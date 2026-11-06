@@ -110,9 +110,12 @@ async function postJournalEntry(client, {
     const account = accountsById.get(postedLine.account_id.toLowerCase());
 
     postedLines.push({
-      ...postedLine,
+      id: postedLine.id,
+      entryId: postedLine.entry_id,
+      accountId: postedLine.account_id,
       debit: centsToDecimal(line.debitCents),
       credit: centsToDecimal(line.creditCents),
+      description: postedLine.description,
       accountCode: account.code,
       accountName: account.name,
     });

@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const { pool, withTransaction } = require('../src/config/db');
 
 const DEMO_COMPANY_NAME = 'Folio Demo Company';

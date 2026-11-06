@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ quiet: true });
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const { pool } = require('../src/config/db');
