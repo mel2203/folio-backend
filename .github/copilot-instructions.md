@@ -7,7 +7,7 @@ Tech stack (do not change)
 • zod for request validation.
 • jest and supertest for tests.
 • Plain SQL migration files in migrations/.
-• Do not add any other dependency without asking first and explaining why.
+• Allowed additions from Phase 2: bcryptjs, jsonwebtoken, express-rate-limit, helmet. Do not add any other dependency without asking first and explaining why.
 
 Folder structure
 index.js starts the server (listen only)
@@ -66,3 +66,13 @@ How to work
 • Do not modify files outside this repository, .gitignore, or .env. Do not delete existing files.
 • Write simple, readable code with short comments explaining accounting logic, because a student must be able to explain it in a presentation.
 • Prefer clear names over clever code. No unused code, no console logs left behind.
+
+Add a new section: Authentication and authorisation rules
+• Passwords are hashed with bcryptjs using a cost factor of 12. Never store, log, return or compare plaintext passwords. Never return password_hash in any response. Select explicit columns; do not use SELECT \* on the users table.
+• Tokens are JWTs signed with JWT_SECRET using HS256. Always pass algorithms: ['HS256'] when verifying, so tokens using none or other algorithms are rejected.
+• JWT_SECRET must be at least 32 characters. The app must refuse to start if it is missing or too short. Never log it, hard-code it or put a real value in .env.example.
+• The company for a request comes only from the authenticated user's row in the database, loaded by the authenticated middleware. Never from the request body, URL, query string or a client-supplied header.
+• Login errors must be identical for an unknown email and a wrong password ("Invalid email or password") and must take similar time (compare against a dummy hash when the user does not exist).
+• Auth endpoints are rate limited. Rate limiting is disabled only when NODE_ENV is test.
+• Error responses for authentication failures use status 401 with code UNAUTHENTICATED and never say why a token failed in detail.
+• Every route except GET /health, POST /api/auth/register and POST /api/auth/login requires a valid token.

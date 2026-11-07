@@ -4,12 +4,26 @@ const path = require('node:path');
 const request = require('supertest');
 const app = require('../src/app');
 const { pool, withTransaction } = require('../src/config/db');
+const { register, login } = require('../src/services/auth.service');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 
 const MIGRATIONS_DIRECTORY = path.join(__dirname, '..', 'migrations');
 const createdCompanyIds = new Set();
 let companyId;
 let cashAccountId;
 let capitalAccountId;
+let authToken;
+let testEmail;
+let testPassword;
+let mainTestUser;
+
+function api(method, route, token = authToken) {
+  const testRequest = request(app)[method](route);
+  return token
+    ? testRequest.set('Authorization', `Bearer ${token}`)
+    : testRequest;
+}
 
 async function applyTestMigrations() {
   await pool.query(`
@@ -75,6 +89,41 @@ async function createCompany(name) {
   return company;
 }
 
+async function registerTestUser({ trackForCleanup = true } = {}) {
+  const uniqueId = randomUUID();
+  const email = `api-${uniqueId}@example.com`;
+  const password = 'Test-password-123';
+  const result = await register({
+    companyName: `Authenticated API company ${uniqueId}`,
+    fullName: 'API Test User',
+    email,
+    password,
+  });
+  const loginResult = await login({ email, password });
+  const accountResult = await pool.query(
+    `SELECT id, code
+     FROM accounts
+     WHERE company_id = $1 AND code IN ($2, $3)`,
+    [result.company.id, '1000', '3000'],
+  );
+  const accountsByCode = new Map(
+    accountResult.rows.map((account) => [account.code, account.id]),
+  );
+
+  if (trackForCleanup) {
+    createdCompanyIds.add(result.company.id);
+  }
+  return {
+    companyId: result.company.id,
+    userId: result.user.id,
+    token: loginResult.token,
+    email,
+    password,
+    cashAccountId: accountsByCode.get('1000'),
+    capitalAccountId: accountsByCode.get('3000'),
+  };
+}
+
 async function removeCompany(testCompanyId) {
   await withTransaction(async (client) => {
     await client.query(
@@ -83,6 +132,10 @@ async function removeCompany(testCompanyId) {
     );
     await client.query(
       'DELETE FROM accounts WHERE company_id = $1',
+      [testCompanyId],
+    );
+    await client.query(
+      'DELETE FROM users WHERE company_id = $1',
       [testCompanyId],
     );
     await client.query(
@@ -106,14 +159,40 @@ function balancedBody(date = '2026-11-05', debit = '10.00', credit = debit) {
 describe('journal and account API', () => {
   beforeAll(async () => {
     await applyTestMigrations();
+    mainTestUser = await registerTestUser({ trackForCleanup: false });
+    companyId = mainTestUser.companyId;
+    cashAccountId = mainTestUser.cashAccountId;
+    capitalAccountId = mainTestUser.capitalAccountId;
+    authToken = mainTestUser.token;
+    testEmail = mainTestUser.email;
+    testPassword = mainTestUser.password;
   });
 
   beforeEach(async () => {
-    const company = await createCompany(`API test company ${randomUUID()}`);
-    companyId = company.id;
-    cashAccountId = company.cashAccountId;
-    capitalAccountId = company.capitalAccountId;
-    process.env.DEV_COMPANY_ID = companyId;
+    companyId = mainTestUser.companyId;
+    cashAccountId = mainTestUser.cashAccountId;
+    capitalAccountId = mainTestUser.capitalAccountId;
+    authToken = mainTestUser.token;
+    testEmail = mainTestUser.email;
+    testPassword = mainTestUser.password;
+
+    await withTransaction(async (client) => {
+      await client.query(
+        'UPDATE accounts SET is_active = true WHERE company_id = $1',
+        [companyId],
+      );
+      await client.query(
+        `DELETE FROM journal_lines
+         WHERE entry_id IN (
+           SELECT id FROM journal_entries WHERE company_id = $1
+         )`,
+        [companyId],
+      );
+      await client.query(
+        'DELETE FROM journal_entries WHERE company_id = $1',
+        [companyId],
+      );
+    });
   });
 
   afterEach(async () => {
@@ -121,27 +200,30 @@ describe('journal and account API', () => {
       await removeCompany(testCompanyId);
       createdCompanyIds.delete(testCompanyId);
     }
-    delete process.env.DEV_COMPANY_ID;
   });
 
   afterAll(async () => {
+    if (mainTestUser) {
+      await removeCompany(mainTestUser.companyId);
+    }
     await pool.end();
   });
 
   test('lists accounts for the current company only', async () => {
     const otherCompany = await createCompany(`Other API company ${randomUUID()}`);
 
-    const response = await request(app).get('/api/accounts');
+    const response = await api('get', '/api/accounts');
 
     expect(response.status).toBe(200);
-    expect(response.body.data.map((account) => account.code)).toEqual(['1000', '3000']);
+    expect(response.body.data).toHaveLength(15);
+    expect(response.body.data.map((account) => account.code)).toContain('1000');
+    expect(response.body.data.map((account) => account.code)).toContain('3000');
     expect(response.body.data.some((account) => account.id === otherCompany.cashAccountId))
       .toBe(false);
   });
 
   test('creates a balanced manual entry', async () => {
-    const response = await request(app)
-      .post('/api/journal-entries')
+    const response = await api('post', '/api/journal-entries')
       .send(balancedBody());
 
     expect(response.status).toBe(201);
@@ -156,13 +238,12 @@ describe('journal and account API', () => {
   });
 
   test('returns 422 for an unbalanced entry and saves nothing', async () => {
-    const response = await request(app)
-      .post('/api/journal-entries')
+    const response = await api('post', '/api/journal-entries')
       .send(balancedBody('2026-11-05', '10.01', '10.00'));
 
     expect(response.status).toBe(422);
     expect(response.body.error.code).toBe('BUSINESS_RULE_VIOLATION');
-    const listResponse = await request(app).get('/api/journal-entries');
+    const listResponse = await api('get', '/api/journal-entries');
     expect(listResponse.body.data).toHaveLength(0);
   });
 
@@ -170,8 +251,7 @@ describe('journal and account API', () => {
     const body = balancedBody();
     body.lines[0].credit = '1.00';
 
-    const response = await request(app)
-      .post('/api/journal-entries')
+    const response = await api('post', '/api/journal-entries')
       .send(body);
 
     expect(response.status).toBe(422);
@@ -182,8 +262,7 @@ describe('journal and account API', () => {
     const body = balancedBody();
     body.lines = [body.lines[0]];
 
-    const response = await request(app)
-      .post('/api/journal-entries')
+    const response = await api('post', '/api/journal-entries')
       .send(body);
 
     expect(response.status).toBe(422);
@@ -194,8 +273,7 @@ describe('journal and account API', () => {
     const body = balancedBody();
     body.lines[1].accountId = otherCompany.capitalAccountId;
 
-    const response = await request(app)
-      .post('/api/journal-entries')
+    const response = await api('post', '/api/journal-entries')
       .send(body);
 
     expect(response.status).toBe(422);
@@ -207,8 +285,7 @@ describe('journal and account API', () => {
       [companyId, capitalAccountId],
     );
 
-    const response = await request(app)
-      .post('/api/journal-entries')
+    const response = await api('post', '/api/journal-entries')
       .send(balancedBody());
 
     expect(response.status).toBe(422);
@@ -217,28 +294,23 @@ describe('journal and account API', () => {
   test('rejects malformed amounts and dates with validation errors', async () => {
     const malformedAmount = balancedBody();
     malformedAmount.lines[0].debit = '10.001';
-    const amountResponse = await request(app)
-      .post('/api/journal-entries')
+    const amountResponse = await api('post', '/api/journal-entries')
       .send(malformedAmount);
 
     expect(amountResponse.status).toBe(400);
     expect(amountResponse.body.error.code).toBe('VALIDATION_ERROR');
 
-    const dateResponse = await request(app)
-      .post('/api/journal-entries')
+    const dateResponse = await api('post', '/api/journal-entries')
       .send({ ...balancedBody(), date: '2026-02-30' });
     expect(dateResponse.status).toBe(400);
   });
 
   test('lists entries with date, status, and pagination filters', async () => {
-    const earlier = await request(app)
-      .post('/api/journal-entries')
+    const earlier = await api('post', '/api/journal-entries')
       .send(balancedBody('2026-11-03'));
-    const middle = await request(app)
-      .post('/api/journal-entries')
+    const middle = await api('post', '/api/journal-entries')
       .send(balancedBody('2026-11-04'));
-    const latest = await request(app)
-      .post('/api/journal-entries')
+    const latest = await api('post', '/api/journal-entries')
       .send(balancedBody('2026-11-05'));
     expect([earlier.status, middle.status, latest.status]).toEqual([201, 201, 201]);
 
@@ -247,8 +319,7 @@ describe('journal and account API', () => {
       ['void', companyId, middle.body.data.id],
     );
 
-    const response = await request(app)
-      .get('/api/journal-entries')
+    const response = await api('get', '/api/journal-entries')
       .query({ from: '2026-11-04', to: '2026-11-05', status: 'posted', page: '1', limit: '1' });
 
     expect(response.status).toBe(200);
@@ -256,19 +327,16 @@ describe('journal and account API', () => {
     expect(response.body.data).toHaveLength(1);
     expect(response.body.data[0].id).toBe(latest.body.data.id);
 
-    const secondPage = await request(app)
-      .get('/api/journal-entries')
+    const secondPage = await api('get', '/api/journal-entries')
       .query({ page: '2', limit: '1' });
     expect(secondPage.body.meta).toEqual({ page: 2, limit: 1, total: 3 });
     expect(secondPage.body.data).toHaveLength(1);
   });
 
   test('gets an entry with its lines, and returns 404 for missing entries', async () => {
-    const created = await request(app)
-      .post('/api/journal-entries')
+    const created = await api('post', '/api/journal-entries')
       .send(balancedBody());
-    const response = await request(app)
-      .get(`/api/journal-entries/${created.body.data.id}`);
+    const response = await api('get', `/api/journal-entries/${created.body.data.id}`);
 
     expect(response.status).toBe(200);
     expect(response.body.data.lines[0]).toMatchObject({
@@ -276,8 +344,7 @@ describe('journal and account API', () => {
       accountName: 'Cash and Bank',
     });
 
-    const missingResponse = await request(app)
-      .get('/api/journal-entries/ffffffff-ffff-4fff-8fff-ffffffffffff');
+    const missingResponse = await api('get', '/api/journal-entries/ffffffff-ffff-4fff-8fff-ffffffffffff');
     expect(missingResponse.status).toBe(404);
     expect(missingResponse.body.error.code).toBe('NOT_FOUND');
 
@@ -302,8 +369,7 @@ describe('journal and account API', () => {
       return result.rows[0].id;
     });
 
-    const crossCompanyResponse = await request(app)
-      .get(`/api/journal-entries/${otherEntry}`);
+    const crossCompanyResponse = await api('get', `/api/journal-entries/${otherEntry}`);
     expect(crossCompanyResponse.status).toBe(404);
   });
 
@@ -338,4 +404,225 @@ describe('journal and account API', () => {
     );
     expect(savedEntry.rowCount).toBe(0);
   });
+
+  test('registers a company, user, and 15 default accounts without returning the password hash', async () => {
+    const email = `registration-${randomUUID()}@example.com`;
+    const password = 'Registration-password-1';
+    const response = await request(app)
+      .post('/api/auth/register')
+      .send({
+        companyName: '  Registration Test Company ',
+        fullName: ' Registration User ',
+        email: ` ${email} `,
+        password,
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data.user.email).toBe(email);
+    expect(response.body.data.user.fullName).toBe('Registration User');
+    expect(response.body.data.user).not.toHaveProperty('password_hash');
+    expect(response.body.data.user).not.toHaveProperty('passwordHash');
+    expect(response.body.data.company.name).toBe('Registration Test Company');
+    const newCompanyId = response.body.data.company.id;
+    createdCompanyIds.add(newCompanyId);
+
+    const accountCount = await pool.query(
+      'SELECT COUNT(*) AS total FROM accounts WHERE company_id = $1',
+      [newCompanyId],
+    );
+    expect(Number(accountCount.rows[0].total)).toBe(15);
+
+    const userResult = await pool.query(
+      `SELECT password_hash
+       FROM users
+       WHERE id = $1 AND company_id = $2`,
+      [response.body.data.user.id, newCompanyId],
+    );
+    const storedHash = userResult.rows[0].password_hash;
+    expect(storedHash === password).toBe(false);
+    expect(await bcrypt.compare(password, storedHash)).toBe(true);
+  });
+
+  test('rejects duplicate registration regardless of email case', async () => {
+    const response = await request(app)
+      .post('/api/auth/register')
+      .send({
+        companyName: 'Duplicate Test Company',
+        fullName: 'Duplicate User',
+        email: testEmail.toUpperCase(),
+        password: 'Another-password-1',
+      });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('EMAIL_IN_USE');
+  });
+
+  test('rejects invalid registration and login inputs', async () => {
+    const weakPasswordResponse = await request(app)
+      .post('/api/auth/register')
+      .send({
+        companyName: 'Invalid Test Company',
+        fullName: 'Invalid User',
+        email: `weak-${randomUUID()}@example.com`,
+        password: 'short',
+      });
+    const invalidEmailResponse = await request(app)
+      .post('/api/auth/register')
+      .send({
+        companyName: 'Invalid Test Company',
+        fullName: 'Invalid User',
+        email: 'not-an-email',
+        password: 'Valid-password-1',
+      });
+    const unknownFieldResponse = await request(app)
+      .post('/api/auth/login')
+      .send({
+        email: testEmail,
+        password: testPassword,
+        companyId,
+      });
+
+    expect(weakPasswordResponse.status).toBe(400);
+    expect(invalidEmailResponse.status).toBe(400);
+    expect(unknownFieldResponse.status).toBe(400);
+  });
+
+  test('logs in and returns a user without a password hash', async () => {
+    const response = await request(app)
+      .post('/api/auth/login')
+      .send({ email: ` ${testEmail.toUpperCase()} `, password: testPassword });
+
+    expect(response.status).toBe(200);
+    expect(typeof response.body.data.token === 'string').toBe(true);
+    expect(response.body.data.user).toMatchObject({
+      email: testEmail,
+      fullName: 'API Test User',
+    });
+    expect(response.body.data.user).not.toHaveProperty('passwordHash');
+    expect(response.body.data.user).not.toHaveProperty('password_hash');
+  });
+
+  test('returns identical login errors for an unknown email and a wrong password', async () => {
+    const wrongPassword = await request(app)
+      .post('/api/auth/login')
+      .send({ email: testEmail, password: 'Wrong-password-1' });
+    const unknownEmail = await request(app)
+      .post('/api/auth/login')
+      .send({ email: `unknown-${randomUUID()}@example.com`, password: 'Wrong-password-1' });
+
+    expect(wrongPassword.status).toBe(401);
+    expect(unknownEmail.status).toBe(401);
+    expect(wrongPassword.body.error.code).toBe('UNAUTHENTICATED');
+    expect(unknownEmail.body.error.code).toBe('UNAUTHENTICATED');
+    expect(wrongPassword.body.error.message).toBe('Invalid email or password');
+    expect(unknownEmail.body.error.message).toBe('Invalid email or password');
+  });
+
+  test('returns the authenticated user and company from /me', async () => {
+    const response = await api('get', '/api/auth/me');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.user).toMatchObject({
+      id: expect.any(String),
+      email: testEmail,
+      fullName: 'API Test User',
+    });
+    expect(response.body.data.company).toMatchObject({
+      id: companyId,
+      name: expect.stringContaining('Authenticated API company'),
+      baseCurrency: 'MYR',
+    });
+  });
+
+  test('rejects missing and invalid tokens on every protected API route', async () => {
+    const invalidTokens = [
+      null,
+      'malformed-token',
+      jwt.sign({ sub: 'not-a-real-user' }, 'wrong-secret-with-at-least-thirty-two-characters'),
+      jwt.sign({ sub: 'not-a-real-user' }, process.env.JWT_SECRET, { expiresIn: -1 }),
+      (() => {
+        const valid = jwt.sign({ sub: 'not-a-real-user' }, process.env.JWT_SECRET);
+        const [header, payload, signature] = valid.split('.');
+        const changedSignature = signature[0] === 'A' ? 'B' : 'A';
+        return `${header}.${payload}.${changedSignature}${signature.slice(1)}`;
+      })(),
+      (() => {
+        const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+        const payload = Buffer.from(JSON.stringify({ sub: 'not-a-real-user' })).toString('base64url');
+        return `${header}.${payload}.`;
+      })(),
+    ];
+
+    for (const token of invalidTokens) {
+      for (const [method, route] of [
+        ['get', '/api/accounts'],
+        ['get', '/api/journal-entries'],
+        ['get', '/api/journal-entries/ffffffff-ffff-4fff-8fff-ffffffffffff'],
+        ['post', '/api/journal-entries'],
+        ['get', '/api/auth/me'],
+      ]) {
+        const testRequest = api(method, route, token);
+        if (method === 'post') {
+          testRequest.send({});
+        }
+        const response = await testRequest;
+        expect(response.status).toBe(401);
+        expect(response.body.error.code).toBe('UNAUTHENTICATED');
+      }
+    }
+  });
+
+  test('rejects a valid token after its user has been deleted', async () => {
+    const deletedUser = await registerTestUser();
+    const deletedUserId = (await pool.query(
+      'SELECT id FROM users WHERE company_id = $1',
+      [deletedUser.companyId],
+    )).rows[0].id;
+    await pool.query(
+      'DELETE FROM users WHERE company_id = $1 AND id = $2',
+      [deletedUser.companyId, deletedUserId],
+    );
+
+    const response = await api('get', '/api/accounts', deletedUser.token);
+
+    expect(response.status).toBe(401);
+    expect(response.body.error.code).toBe('UNAUTHENTICATED');
+  });
+
+  test('isolates accounts and journal entries between two authenticated companies', async () => {
+    const userB = await registerTestUser();
+    const entryForUserB = await api('post', '/api/journal-entries', userB.token)
+      .send({
+        date: '2026-11-05',
+        memo: 'Private entry',
+        lines: [
+          { accountId: userB.cashAccountId, debit: '10.00', credit: '0.00' },
+          { accountId: userB.capitalAccountId, debit: '0.00', credit: '10.00' },
+        ],
+      });
+    expect(entryForUserB.status).toBe(201);
+
+    const accountsForUserA = await api('get', '/api/accounts');
+    const entriesForUserA = await api('get', '/api/journal-entries');
+    const userBEntryAsUserA = await api(
+      'get',
+      `/api/journal-entries/${entryForUserB.body.data.id}`,
+    );
+    const userBAccountForUserA = await api('post', '/api/journal-entries')
+      .send({
+        date: '2026-11-05',
+        memo: 'Attempt to use a foreign account',
+        lines: [
+          { accountId: userB.cashAccountId, debit: '10.00', credit: '0.00' },
+          { accountId: capitalAccountId, debit: '0.00', credit: '10.00' },
+        ],
+      });
+
+    expect(accountsForUserA.body.data).toHaveLength(15);
+    expect(accountsForUserA.body.data.some((account) => account.id === userB.cashAccountId))
+      .toBe(false);
+    expect(entriesForUserA.body.meta.total).toBe(0);
+    expect(userBEntryAsUserA.status).toBe(404);
+    expect(userBAccountForUserA.status).toBe(422);
+  }, 30000);
 });
