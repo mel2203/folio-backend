@@ -75,7 +75,7 @@ async function getJournalEntry(client, companyId, entryId) {
      JOIN journal_entries je ON je.id = jl.entry_id
      JOIN accounts a ON a.id = jl.account_id AND a.company_id = je.company_id
      WHERE je.company_id = $1 AND je.id = $2
-     ORDER BY jl.id ASC`,
+     ORDER BY a.code ASC, jl.id ASC`,
     [companyId, entryId],
   );
 
