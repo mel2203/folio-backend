@@ -12,3 +12,5 @@ if (
 }
 
 process.env.DATABASE_URL = process.env.DATABASE_URL_TEST;
+process.env.JWT_SECRET = 'test-only-jwt-secret-not-for-production-000000';
+process.env.JWT_EXPIRES_IN = '2h';
