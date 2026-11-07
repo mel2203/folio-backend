@@ -59,9 +59,9 @@ async function createCompany(name) {
     );
     const capitalResult = await client.query(
       `INSERT INTO accounts (company_id, code, name, type, normal_balance)
-       VALUES ($1, '3000', 'Owner's Capital', 'equity', 'credit')
+       VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [newCompanyId],
+      [newCompanyId, '3000', "Owner's Capital", 'equity', 'credit'],
     );
 
     return {
