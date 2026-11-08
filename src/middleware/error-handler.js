@@ -39,6 +39,14 @@ function errorHandler(error, req, res, next) {
     });
   }
 
+//delete after testing
+  if (process.env.NODE_ENV !== 'production') {
+    console.error('Unhandled error:', error.code, error.message);
+  }
+
+
+
+
   return res.status(500).json({
     error: {
       code: 'INTERNAL_SERVER_ERROR',
