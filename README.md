@@ -69,6 +69,9 @@ The API includes:
 - `POST /api/journal-entries`
 - `GET /api/journal-entries`
 - `GET /api/journal-entries/:id`
+- `GET /api/reports/trial-balance`
+- `GET /api/reports/income-statement`
+- `GET /api/reports/balance-sheet`
 
 Every API route other than registration and login requires `Authorization: Bearer <token>`. Company scope is loaded from the authenticated user's database record.
 
@@ -112,3 +115,100 @@ NODE_ENV=test npm test
 ```
 
 The test setup refuses to run unless `NODE_ENV=test`, `DATABASE_URL_TEST` is set, and it differs from `DATABASE_URL`. The integration tests apply the migrations to the test database, create and remove their own test companies, and exercise the API and database balance trigger. Do not use a development or production database as the test database.
+
+## Reports
+
+All report endpoints require `Authorization: Bearer <token>`. Reports are calculated from posted journal lines for the authenticated user's company. Date ranges are inclusive; dates use `YYYY-MM-DD`. If a date parameter is omitted, defaults use the current date in `Asia/Kuala_Lumpur`.
+
+### Trial Balance
+
+`GET /api/reports/trial-balance?asOf=YYYY-MM-DD`
+
+`asOf` is optional and defaults to today in Kuala Lumpur time. The response includes accounts with posted lines on or before the date, debit and credit totals, and a balance flag.
+
+```json
+{
+  "data": {
+    "asOf": "<yyyy-mm-dd>",
+    "currency": "<currency>",
+    "accounts": [
+      {
+        "accountId": "<account-id>",
+        "code": "<account-code>",
+        "name": "<account-name>",
+        "type": "<account-type>",
+        "debit": "<amount>",
+        "credit": "<amount>"
+      }
+    ],
+    "totals": { "debit": "<amount>", "credit": "<amount>" },
+    "isBalanced": true
+  }
+}
+```
+
+### Income Statement (Profit and Loss)
+
+`GET /api/reports/income-statement?from=YYYY-MM-DD&to=YYYY-MM-DD`
+
+Both parameters are optional. `from` defaults to the first day of the current month in Kuala Lumpur time; `to` defaults to today. `from` must be on or before `to`.
+
+```json
+{
+  "data": {
+    "from": "<yyyy-mm-dd>",
+    "to": "<yyyy-mm-dd>",
+    "currency": "<currency>",
+    "revenue": {
+      "accounts": [
+        {
+          "accountId": "<account-id>",
+          "code": "<account-code>",
+          "name": "<account-name>",
+          "amount": "<amount>"
+        }
+      ],
+      "total": "<amount>"
+    },
+    "expenses": {
+      "accounts": [
+        {
+          "accountId": "<account-id>",
+          "code": "<account-code>",
+          "name": "<account-name>",
+          "amount": "<amount>"
+        }
+      ],
+      "total": "<amount>"
+    },
+    "netIncome": "<amount>"
+  }
+}
+```
+
+### Balance Sheet
+
+`GET /api/reports/balance-sheet?asOf=YYYY-MM-DD`
+
+`asOf` is optional and defaults to today in Kuala Lumpur time. Current earnings are the all-time net income through `asOf`, since the system does not yet create period-closing entries.
+
+```json
+{
+  "data": {
+    "asOf": "<yyyy-mm-dd>",
+    "currency": "<currency>",
+    "assets": { "accounts": [], "total": "<amount>" },
+    "liabilities": { "accounts": [], "total": "<amount>" },
+    "equity": {
+      "accounts": [],
+      "currentEarnings": "<amount>",
+      "total": "<amount>"
+    },
+    "totalLiabilitiesAndEquity": "<amount>",
+    "isBalanced": true,
+    "difference": "<amount>"
+  }
+}
+```
+
+Each account in the Balance Sheet's `assets`, `liabilities`, and `equity` arrays has `accountId`, `code`, `name`, and `amount` fields. Monetary response values are strings with two decimal places. Empty account lists and zero totals are returned when there are no matching posted lines.

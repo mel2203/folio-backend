@@ -10,6 +10,7 @@ const helmet = require('helmet');
 const accountRoutes = require('./routes/account.routes');
 const journalRoutes = require('./routes/journal.routes');
 const authRoutes = require('./routes/auth.routes');
+const reportRoutes = require('./routes/report.routes');
 const authenticate = require('./middleware/authenticate');
 const errorHandler = require('./middleware/error-handler');
 
@@ -27,6 +28,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api', authenticate);
 app.use('/api/accounts', accountRoutes);
 app.use('/api/journal-entries', journalRoutes);
+app.use('/api/reports', reportRoutes);
 app.use(errorHandler);
 
 module.exports = app;
