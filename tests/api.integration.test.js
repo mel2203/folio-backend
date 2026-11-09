@@ -558,6 +558,9 @@ describe('journal and account API', () => {
         ['get', '/api/accounts'],
         ['get', '/api/journal-entries'],
         ['get', '/api/journal-entries/ffffffff-ffff-4fff-8fff-ffffffffffff'],
+        ['get', '/api/reports/trial-balance'],
+        ['get', '/api/reports/income-statement'],
+        ['get', '/api/reports/balance-sheet'],
         ['post', '/api/journal-entries'],
         ['get', '/api/auth/me'],
       ]) {
@@ -625,4 +628,212 @@ describe('journal and account API', () => {
     expect(userBEntryAsUserA.status).toBe(404);
     expect(userBAccountForUserA.status).toBe(422);
   }, 30000);
+
+  async function getAccountIds(codes, targetCompanyId = companyId) {
+    const result = await pool.query(
+      'SELECT id, code FROM accounts WHERE company_id = $1 AND code = ANY($2::text[])',
+      [targetCompanyId, codes],
+    );
+    return new Map(result.rows.map((account) => [account.code, account.id]));
+  }
+
+  async function createReportEntry(date, lines, token = authToken) {
+    return api('post', '/api/journal-entries', token).send({
+      date,
+      memo: 'Report test entry',
+      lines,
+    });
+  }
+
+  test('returns trial balance, income statement, and balance sheet from posted lines', async () => {
+    const ids = await getAccountIds(['1000', '1100', '3000', '4000', '6000']);
+    const entries = [
+      await createReportEntry('2026-11-01', [
+        { accountId: ids.get('1000'), debit: '5000.00', credit: '0.00' },
+        { accountId: ids.get('3000'), debit: '0.00', credit: '5000.00' },
+      ]),
+      await createReportEntry('2026-11-05', [
+        { accountId: ids.get('1100'), debit: '1000.00', credit: '0.00' },
+        { accountId: ids.get('4000'), debit: '0.00', credit: '1000.00' },
+      ]),
+      await createReportEntry('2026-11-06', [
+        { accountId: ids.get('6000'), debit: '300.00', credit: '0.00' },
+        { accountId: ids.get('1000'), debit: '0.00', credit: '300.00' },
+      ]),
+    ];
+    expect(entries.map((entry) => entry.status)).toEqual([201, 201, 201]);
+
+    const trial = await api('get', '/api/reports/trial-balance').query({ asOf: '2026-11-06' });
+    expect(trial.status).toBe(200);
+    expect(trial.body.data).toMatchObject({
+      asOf: '2026-11-06',
+      currency: 'MYR',
+      accounts: [
+        { accountId: ids.get('1000'), code: '1000', name: 'Cash and Bank', type: 'asset', debit: '4700.00', credit: '0.00' },
+        { accountId: ids.get('1100'), code: '1100', name: 'Accounts Receivable', type: 'asset', debit: '1000.00', credit: '0.00' },
+        { accountId: ids.get('3000'), code: '3000', name: "Owner's Capital", type: 'equity', debit: '0.00', credit: '5000.00' },
+        { accountId: ids.get('4000'), code: '4000', name: 'Sales Revenue', type: 'revenue', debit: '0.00', credit: '1000.00' },
+        { accountId: ids.get('6000'), code: '6000', name: 'Rent Expense', type: 'expense', debit: '300.00', credit: '0.00' },
+      ],
+      totals: { debit: '6000.00', credit: '6000.00' },
+      isBalanced: true,
+    });
+
+    const income = await api('get', '/api/reports/income-statement')
+      .query({ from: '2026-11-01', to: '2026-11-06' });
+    expect(income.status).toBe(200);
+    expect(income.body.data).toMatchObject({
+      from: '2026-11-01',
+      to: '2026-11-06',
+      currency: 'MYR',
+      revenue: {
+        accounts: [{ accountId: ids.get('4000'), code: '4000', name: 'Sales Revenue', amount: '1000.00' }],
+        total: '1000.00',
+      },
+      expenses: {
+        accounts: [{ accountId: ids.get('6000'), code: '6000', name: 'Rent Expense', amount: '300.00' }],
+        total: '300.00',
+      },
+      netIncome: '700.00',
+    });
+
+    const balance = await api('get', '/api/reports/balance-sheet').query({ asOf: '2026-11-06' });
+    expect(balance.status).toBe(200);
+    expect(balance.body.data).toMatchObject({
+      asOf: '2026-11-06',
+      currency: 'MYR',
+      assets: { total: '5700.00' },
+      liabilities: { accounts: [], total: '0.00' },
+      equity: {
+        accounts: [{ accountId: ids.get('3000'), code: '3000', name: "Owner's Capital", amount: '5000.00' }],
+        currentEarnings: '700.00',
+        total: '5700.00',
+      },
+      totalLiabilitiesAndEquity: '5700.00',
+      isBalanced: true,
+      difference: '0.00',
+    });
+    expect(balance.body.data.assets.accounts).toEqual([
+      { accountId: ids.get('1000'), code: '1000', name: 'Cash and Bank', amount: '4700.00' },
+      { accountId: ids.get('1100'), code: '1100', name: 'Accounts Receivable', amount: '1000.00' },
+    ]);
+
+    for (const response of [trial, income, balance]) {
+      expect(JSON.stringify(response.body)).not.toMatch(/password_hash|passwordHash|@example\.com|fullName/i);
+    }
+  });
+
+  test('excludes future, out-of-range, and void journal entries', async () => {
+    const ids = await getAccountIds(['1100', '4000']);
+    const earlier = await createReportEntry('2026-10-31', [
+      { accountId: ids.get('1100'), debit: '100.00', credit: '0.00' },
+      { accountId: ids.get('4000'), debit: '0.00', credit: '100.00' },
+    ]);
+    const included = await createReportEntry('2026-11-04', [
+      { accountId: ids.get('1100'), debit: '25.00', credit: '0.00' },
+      { accountId: ids.get('4000'), debit: '0.00', credit: '25.00' },
+    ]);
+    const future = await createReportEntry('2026-11-07', [
+      { accountId: ids.get('1100'), debit: '50.00', credit: '0.00' },
+      { accountId: ids.get('4000'), debit: '0.00', credit: '50.00' },
+    ]);
+    const voidEntry = await createReportEntry('2026-11-03', [
+      { accountId: ids.get('1100'), debit: '75.00', credit: '0.00' },
+      { accountId: ids.get('4000'), debit: '0.00', credit: '75.00' },
+    ]);
+    expect([earlier, included, future, voidEntry].map((entry) => entry.status))
+      .toEqual([201, 201, 201, 201]);
+    await pool.query(
+      'UPDATE journal_entries SET status = $1 WHERE company_id = $2 AND id = $3',
+      ['void', companyId, voidEntry.body.data.id],
+    );
+
+    const income = await api('get', '/api/reports/income-statement')
+      .query({ from: '2026-11-01', to: '2026-11-06' });
+    expect(income.status).toBe(200);
+    expect(income.body.data.revenue.total).toBe('25.00');
+
+    const trial = await api('get', '/api/reports/trial-balance').query({ asOf: '2026-11-06' });
+    expect(trial.status).toBe(200);
+    expect(trial.body.data.accounts.map((account) => account.debit)).toContain('125.00');
+    expect(trial.body.data.totals).toEqual({ debit: '125.00', credit: '125.00' });
+  });
+
+  test('isolates report data between companies', async () => {
+    const userB = await registerTestUser();
+    const entry = await createReportEntry('2026-11-05', [
+      { accountId: userB.cashAccountId, debit: '50.00', credit: '0.00' },
+      { accountId: userB.capitalAccountId, debit: '0.00', credit: '50.00' },
+    ], userB.token);
+    expect(entry.status).toBe(201);
+
+    const response = await api('get', '/api/reports/trial-balance');
+    expect(response.status).toBe(200);
+    expect(response.body.data.accounts).toEqual([]);
+    expect(response.body.data.totals).toEqual({ debit: '0.00', credit: '0.00' });
+    expect(response.body.data.isBalanced).toBe(true);
+  });
+
+  test('returns empty report values for a company with no posted entries', async () => {
+    const emptyUser = await registerTestUser();
+    const [trial, income, balance] = await Promise.all([
+      api('get', '/api/reports/trial-balance', emptyUser.token).query({ asOf: '2026-11-08' }),
+      api('get', '/api/reports/income-statement', emptyUser.token)
+        .query({ from: '2026-11-01', to: '2026-11-08' }),
+      api('get', '/api/reports/balance-sheet', emptyUser.token).query({ asOf: '2026-11-08' }),
+    ]);
+
+    expect(trial.body.data).toMatchObject({ accounts: [], totals: { debit: '0.00', credit: '0.00' }, isBalanced: true });
+    expect(income.body.data).toMatchObject({ revenue: { accounts: [], total: '0.00' }, expenses: { accounts: [], total: '0.00' }, netIncome: '0.00' });
+    expect(balance.body.data).toMatchObject({
+      assets: { accounts: [], total: '0.00' },
+      liabilities: { accounts: [], total: '0.00' },
+      equity: { accounts: [], currentEarnings: '0.00', total: '0.00' },
+      totalLiabilitiesAndEquity: '0.00', isBalanced: true, difference: '0.00',
+    });
+  });
+
+  test('adds awkward decimal amounts exactly using integer cents', async () => {
+    const ids = await getAccountIds(['1000', '3000']);
+    const first = await createReportEntry('2026-11-01', [
+      { accountId: ids.get('1000'), debit: '0.10', credit: '0.00' },
+      { accountId: ids.get('3000'), debit: '0.00', credit: '0.10' },
+    ]);
+    const second = await createReportEntry('2026-11-02', [
+      { accountId: ids.get('1000'), debit: '0.20', credit: '0.00' },
+      { accountId: ids.get('3000'), debit: '0.00', credit: '0.20' },
+    ]);
+    expect([first.status, second.status]).toEqual([201, 201]);
+
+    const response = await api('get', '/api/reports/trial-balance').query({ asOf: '2026-11-08' });
+    expect(response.status).toBe(200);
+    expect(response.body.data.accounts.map((account) => account.debit)).toContain('0.30');
+    expect(response.body.data.accounts.map((account) => account.credit)).toContain('0.30');
+    expect(response.body.data.totals).toEqual({ debit: '0.30', credit: '0.30' });
+  });
+
+  test('rejects invalid report dates, reversed ranges, and missing authentication', async () => {
+    const invalidAsOf = await api('get', '/api/reports/trial-balance')
+      .query({ asOf: '2026-02-30' });
+    const invalidFrom = await api('get', '/api/reports/income-statement')
+      .query({ from: '2026-02-30', to: '2026-03-01' });
+    const reversedRange = await api('get', '/api/reports/income-statement')
+      .query({ from: '2026-11-09', to: '2026-11-08' });
+    expect(invalidAsOf.status).toBe(400);
+    expect(invalidFrom.status).toBe(400);
+    expect(reversedRange.status).toBe(400);
+    expect(invalidAsOf.body.error.code).toBe('VALIDATION_ERROR');
+    expect(reversedRange.body.error.code).toBe('VALIDATION_ERROR');
+
+    for (const route of [
+      '/api/reports/trial-balance',
+      '/api/reports/income-statement',
+      '/api/reports/balance-sheet',
+    ]) {
+      const response = await api('get', route, null);
+      expect(response.status).toBe(401);
+      expect(response.body.error.code).toBe('UNAUTHENTICATED');
+    }
+  });
+
 });
