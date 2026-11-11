@@ -1,5 +1,6 @@
 const { pool } = require('../config/db');
 const { getTrialBalance, getIncomeStatement, getBalanceSheet } = require('../services/report.service');
+const { getArAging } = require('../services/ar-aging.service');
 
 async function trialBalance(req, res) {
   const data = await getTrialBalance(pool, req.companyId, req.validated.query);
@@ -16,4 +17,9 @@ async function balanceSheet(req, res) {
   res.status(200).json({ data });
 }
 
-module.exports = { trialBalance, incomeStatement, balanceSheet };
+async function arAgingReport(req, res) {
+  const data = await getArAging(pool, req.companyId, req.validated.query);
+  res.status(200).json({ data });
+}
+
+module.exports = { trialBalance, incomeStatement, balanceSheet, arAgingReport };
