@@ -10,11 +10,21 @@ async function getArAging(client, companyId, { asOf }) {
        SELECT invoice.id, invoice.customer_id, invoice.due_date,
               invoice.total - COALESCE(SUM(payment.amount) FILTER (WHERE payment.payment_date <= $2), 0) AS outstanding
        FROM invoices invoice
+       JOIN journal_entries invoice_entry
+         ON invoice_entry.id = invoice.journal_entry_id
+         AND invoice_entry.company_id = invoice.company_id
+         AND invoice_entry.status = 'posted'
+         AND invoice_entry.entry_date <= $2
+       LEFT JOIN journal_entries reversal_entry
+         ON reversal_entry.id = invoice.reversal_entry_id
+         AND reversal_entry.company_id = invoice.company_id
+         AND reversal_entry.status = 'posted'
+         AND reversal_entry.entry_date <= $2
        LEFT JOIN payments payment
          ON payment.invoice_id = invoice.id AND payment.company_id = invoice.company_id
        WHERE invoice.company_id = $1
          AND invoice.issue_date <= $2
-         AND invoice.status IN ('sent', 'partial', 'paid')
+         AND reversal_entry.id IS NULL
        GROUP BY invoice.id
      ),
      customer_aging AS (
