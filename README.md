@@ -27,6 +27,7 @@ cp .env.example .env
 - `DATABASE_URL_TEST` is the connection string for a **separate, disposable test database**. Never point it at development or production data.
 - `JWT_SECRET` is a private signing key of at least 32 characters. Generate a unique local value, for example with `openssl rand -hex 32`. Never use the placeholder from `.env.example` outside local setup.
 - `JWT_EXPIRES_IN` controls token lifetime using `jsonwebtoken` duration syntax (default example: `2h`).
+- `DEMO_EMAIL` and `DEMO_PASSWORD` are optional process environment variables used only by `npm run seed:demo`; they are not required to start the API.
 
 The values in `.env.example` are fake examples. Replace the database URLs with your own local PostgreSQL connection strings and set a private `JWT_SECRET`. After creating the development database, apply its migrations and seed the demo company:
 
@@ -36,6 +37,8 @@ npm run seed
 ```
 
 The migration runner applies numbered SQL files once and records their names in `schema_migrations`. The seed can be run again safely; it reuses the demo company and does not duplicate its default accounts. Authentication creates its own company and default accounts during registration; no company ID needs to be configured in the environment.
+
+To create a separate sample company with sales and purchase activity, set `DEMO_EMAIL` and `DEMO_PASSWORD` in the process environment and run `npm run seed:demo`. This command is separate from `npm run seed`; it creates its demo company and sample activity through the application's services. If the demo email already belongs to a company, the script refuses to run unless `--reset` is passed. Reset is limited to the company found by that email and verifies demo markers before deleting. Run it only against a database you intend to change. The script prints the database hostname, not its connection string or credentials.
 
 ## Run the API
 
@@ -358,3 +361,53 @@ Both parameters are optional. `from` defaults to the first day of the current mo
 ```
 
 Each account in the Balance Sheet's `assets`, `liabilities`, and `equity` arrays has `accountId`, `code`, `name`, and `amount` fields. Monetary response values are strings with two decimal places. Empty account lists and zero totals are returned when there are no matching posted lines.
+
+## Dashboard
+
+`GET /api/dashboard/summary?asOf=YYYY-MM-DD` requires authentication. `asOf` is optional and defaults to today's date in `Asia/Kuala_Lumpur`. The endpoint summarizes posted ledger activity for the authenticated user's company:
+
+```json
+{
+  "data": {
+    "asOf": "<yyyy-mm-dd>",
+    "currency": "MYR",
+    "balances": {
+      "cash": "<amount>",
+      "accountsReceivable": "<amount>",
+      "accountsPayable": "<amount>"
+    },
+    "netIncomeThisMonth": "<amount>",
+    "monthlyPerformance": [
+      { "month": "YYYY-MM", "revenue": "<amount>", "expenses": "<amount>" }
+    ],
+    "overdueInvoices": { "count": 0, "amount": "<amount>" },
+    "topCustomers": [
+      { "customerId": "<customer-id>", "name": "<customer-name>", "invoicedAmount": "<amount>" }
+    ],
+    "topExpenseAccounts": [
+      { "accountId": "<account-id>", "code": "<account-code>", "name": "<account-name>", "amount": "<amount>" }
+    ]
+  }
+}
+```
+
+`monthlyPerformance` contains six calendar months, including the month containing `asOf`. All amount fields are decimal strings with two places. `overdueInvoices` supplies only a count and total amount, not invoice detail rows; clients can use the existing paginated invoice endpoint to display invoice details.
+
+## Screenshots
+
+- Dashboard: _Screenshot placeholder — add after deployment._
+- Sales and purchases: _Screenshot placeholder — add after deployment._
+- Reports: _Screenshot placeholder — add after deployment._
+
+## Live links
+
+- Frontend: Not published.
+- Backend API: Not published.
+
+## Accounting design
+
+- **Double entry:** every posted journal entry has at least two lines, and the server validates that total debits equal total credits.
+- **Immutability and reversals:** posted entries and their lines are not updated or deleted by API operations. Corrections create a posted reversal entry linked to the original.
+- **System roles:** sales and purchase posting identifies control accounts by system role, rather than relying on editable account codes.
+- **Cents arithmetic:** money arithmetic uses integer cents in application code. PostgreSQL stores `NUMERIC(14,2)`, and API money values are two-decimal strings.
+- **Tenant isolation:** authenticated middleware derives the company from the user's database record; business queries filter by that company.
