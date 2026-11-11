@@ -3,7 +3,7 @@ const { seedDefaultAccounts } = require('../src/services/chart-of-accounts.servi
 const COMPANY_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 
 describe('seedDefaultAccounts', () => {
-  test('inserts the 15 default accounts for the specified company', async () => {
+  test('inserts the 15 default accounts and system roles for the specified company', async () => {
     const client = {
       query: jest.fn().mockResolvedValue({ rowCount: 1 }),
     };
@@ -46,6 +46,11 @@ describe('seedDefaultAccounts', () => {
           'debit', 'debit', 'debit', 'debit', 'credit',
           'credit', 'credit', 'credit', 'credit', 'credit',
           'debit', 'debit', 'debit', 'debit', 'debit',
+        ],
+        [
+          'cash', 'accounts_receivable', null, null, 'accounts_payable',
+          'sales_tax_payable', null, null, 'sales_revenue', null,
+          null, null, null, null, null,
         ],
       ],
     );

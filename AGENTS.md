@@ -91,3 +91,24 @@ Reporting rules (backend)
 • Sign conventions: asset and expense accounts are debit-normal (balance = debits minus credits); liability, equity and revenue accounts are credit-normal (balance = credits minus debits). A negative balance means the account is on its opposite side.
 • Dates are YYYY-MM-DD strings. Date parameters are validated with zod; from and to are inclusive and from must not be after to.
 • Error format, status codes and authentication middleware stay as they are.
+
+Explain-what-you-built protocol (mandatory after every stage)
+After finishing a stage, and whenever I say "explain", write an explanation for an accounting student who knows the accounting but is still learning the code. Rules:
+• Plain English. Define any technical word the first time. Short sentences.
+• Only describe what is actually in the repository. Cite real file paths and line ranges. Quote code only from the repo, at most 15 lines per excerpt. Never invent code, outputs or test results.
+• Say "not verified" for anything you did not run. Never claim a test passed unless you ran it and show the real summary line.
+• Separate what the code does from what you intended. List what was not built.
+• Cover, in this order: (1) a one-paragraph summary; (2) one real request followed end to end (route, validator, controller, service, SQL, response, client page) with file paths; (3) a table of every journal entry the stage creates (event, debit account, credit account, worked example amount) and which statements it changes; (4) new tables and columns with purpose and constraints; (5) the rules that protect the data (validation, status rules, immutability, rounding, tenant isolation) and where each is enforced; (6) what each test proves, and what is not tested; (7) how to try it: exact clicks, curl or Postman steps and the expected results; (8) decisions, trade-offs and limitations; (9) five questions an examiner might ask with short answers grounded in the code, plus a 60-second presentation script; (10) three commands or greps I can run to check your claims myself.
+• Save it as docs/<stage-name>-explained.md in the repo I name, and also show a short summary in chat.
+Accounting document rules
+• Documents (invoices, bills, payments) are sources; the ledger is the truth. Posting a document creates one balanced journal entry through the existing postJournalEntry service, in the same database transaction as the document change.
+• Journal entries and lines are never updated or deleted. A posted document is corrected by a reversing entry (swap debits and credits, source_type = 'reversal', reverses_entry_id set). Do not mark the original entry void: the original and its reversal both stay posted and net to zero, otherwise reports would remove it twice.
+• Only draft documents may be edited or hard-deleted, because they are not in the ledger yet.
+• Auto-posting finds accounts by system_role (not by code, because users can edit codes). Roles: cash, accounts_receivable, accounts_payable, sales_tax_payable, sales_revenue.
+• Money: integer cents everywhere in code (BigInt), NUMERIC(14,2) in the database, two-decimal strings in the API. Rounding is half up, per line, then totals are sums of the rounded lines. The server computes all totals; the client sends only quantities, prices and rates.
+• Dates are plain YYYY-MM-DD; do date arithmetic without timezone conversion.
+• Every query is scoped by company_id from req.companyId. Every referenced id (customer, vendor, account, invoice) must be checked to belong to the same company.
+Migration rules (they run on production automatically)
+• New numbered files only; never edit a migration that has run. Migrations must be additive and safe to re-run on an existing database with data. Enable row level security on every new table in the same migration (no policies).
+• Test every migration on the test database before merging. Never run migrations, seed or demo scripts against my real database; I do that myself.
+• No new packages unless the stage says so.
