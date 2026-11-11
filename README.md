@@ -116,6 +116,77 @@ NODE_ENV=test npm test
 
 The test setup refuses to run unless `NODE_ENV=test`, `DATABASE_URL_TEST` is set, and it differs from `DATABASE_URL`. The integration tests apply the migrations to the test database, create and remove their own test companies, and exercise the API and database balance trigger. Do not use a development or production database as the test database.
 
+## Sales
+
+Sales endpoints require `Authorization: Bearer <token>`. Customer and invoice list endpoints return `{ "data": [...], "meta": { "page": 1, "limit": 20, "total": 0 } }`. Page defaults to 1 and limit defaults to 20 (maximum 100). Dates are plain `YYYY-MM-DD` strings. Amounts, quantities, unit prices, and tax rates are decimal strings to avoid floating-point arithmetic.
+
+### Customers
+
+- `GET /api/customers?search=<text>&active=true|false&page=1&limit=20`
+- `POST /api/customers`
+- `GET /api/customers/:id`
+- `PATCH /api/customers/:id`
+
+Create body: `{ "name": "Example Customer", "email": "customer@example.test", "phone": "<phone>", "address": "<address>", "paymentTermsDays": 30 }`. PATCH accepts any subset of `name`, `email`, `phone`, `address`, `paymentTermsDays`, and `isActive`. Customers are deactivated, not deleted.
+
+### Invoices
+
+- `GET /api/invoices?status=draft|sent|partial|paid|void&customerId=<uuid>&from=YYYY-MM-DD&to=YYYY-MM-DD&number=<text>&page=1&limit=20`
+- `POST /api/invoices` creates a draft.
+- `GET /api/invoices/:id`
+- `PATCH /api/invoices/:id` edits a draft only.
+- `DELETE /api/invoices/:id` deletes a draft only (204 response).
+- `POST /api/invoices/:id/send` numbers and posts a draft.
+- `POST /api/invoices/:id/void` reverses an unpaid sent invoice.
+- `POST /api/invoices/:id/payments` records a customer payment.
+
+Create body (issue date defaults to today in Kuala Lumpur; due date defaults to issue date plus customer payment terms):
+
+```json
+{
+  "customerId": "<customer-id>", "issueDate": "<yyyy-mm-dd>", "dueDate": "<yyyy-mm-dd>",
+  "items": [{ "description": "Consulting service", "quantity": "1.00", "unitPrice": "100.00", "taxRate": "6.00", "revenueAccountId": "<active-revenue-account-id>" }],
+  "notes": "<notes>"
+}
+```
+
+The server rounds each line net and tax half up to cents, then adds rounded lines. For example, `1.00 × 0.25` at `6.00%` returns net `0.25`, tax `0.02`, and total `0.27`. Drafts have no invoice number. Sending assigns the next company sequence, such as `INV-0001`, and posts debit Accounts Receivable, credit revenue by account, and credit Sales Tax Payable when tax is nonzero. Payments debit an active asset deposit account and credit Accounts Receivable. Voiding creates a posted reversal; paid and partially paid invoices cannot be voided.
+
+Invoice detail response:
+
+```json
+{
+  "data": {
+    "id": "<invoice-id>", "companyId": "<company-id>", "customerId": "<customer-id>",
+    "invoiceNumber": "<invoice-number-or-null>", "issueDate": "<yyyy-mm-dd>", "dueDate": "<yyyy-mm-dd>",
+    "status": "draft", "subtotal": "100.00", "taxTotal": "6.00", "total": "106.00", "amountPaid": "0.00",
+    "notes": null, "journalEntryId": null, "reversalEntryId": null, "createdAt": "<timestamp>",
+    "customer": { "id": "<customer-id>", "name": "Example Customer", "email": "<email-or-null>", "phone": "<phone-or-null>", "address": "<address-or-null>", "paymentTermsDays": 30 },
+    "items": [{ "id": "<item-id>", "description": "Consulting service", "quantity": "1.00", "unitPrice": "100.00", "taxRate": "6.00", "revenueAccountId": "<account-id>", "revenueAccountCode": "4000", "revenueAccountName": "Sales Revenue", "lineSubtotal": "100.00", "lineTax": "6.00", "lineTotal": "106.00" }],
+    "payments": []
+  }
+}
+```
+
+Payment body: `{ "paymentDate": "<yyyy-mm-dd>", "amount": "50.00", "method": "bank_transfer", "reference": "<reference-or-null>", "depositAccountId": "<active-asset-account-id>" }`. Payment success returns `{ "data": { "payment": { "id": "<payment-id>", "paymentDate": "<yyyy-mm-dd>", "amount": "50.00", "method": "bank_transfer", "reference": "<reference-or-null>", "depositAccountId": "<account-id>", "journalEntryId": "<entry-id>", "createdAt": "<timestamp>" }, "invoice": { "...": "updated invoice detail" } } }`.
+
+### Accounts Receivable Aging
+
+`GET /api/reports/ar-aging?asOf=YYYY-MM-DD`
+
+`asOf` defaults to today in Kuala Lumpur time. Open invoices issued on or before the date are grouped by due date. Payments dated after `asOf` do not reduce the historical outstanding amount. Ledger balance uses the Accounts Receivable system account. `difference` is ledger balance minus aging total, so manual journal entries to A/R appear as a mismatch.
+
+```json
+{
+  "data": {
+    "asOf": "<yyyy-mm-dd>", "currency": "MYR",
+    "customers": [{ "customerId": "<customer-id>", "name": "Example Customer", "current": "0.00", "days1To30": "100.00", "days31To60": "0.00", "days61To90": "0.00", "days90Plus": "0.00", "total": "100.00" }],
+    "totals": { "current": "0.00", "days1To30": "100.00", "days31To60": "0.00", "days61To90": "0.00", "days90Plus": "0.00", "total": "100.00" },
+    "ledgerBalance": "100.00", "difference": "0.00", "reconciles": true
+  }
+}
+```
+
 ## Reports
 
 All report endpoints require `Authorization: Bearer <token>`. Reports are calculated from posted journal lines for the authenticated user's company. Date ranges are inclusive; dates use `YYYY-MM-DD`. If a date parameter is omitted, defaults use the current date in `Asia/Kuala_Lumpur`.

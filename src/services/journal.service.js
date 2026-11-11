@@ -43,6 +43,7 @@ async function postJournalEntry(client, {
   memo = null,
   sourceType,
   sourceId = null,
+  reversesEntryId = null,
   lines,
 }) {
   if (!Array.isArray(lines) || lines.length < 2) {
@@ -84,10 +85,10 @@ async function postJournalEntry(client, {
 
   const entryResult = await client.query(
     `INSERT INTO journal_entries
-       (company_id, entry_date, memo, source_type, source_id)
-     VALUES ($1, $2, $3, $4, $5)
+       (company_id, entry_date, memo, source_type, source_id, reverses_entry_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id, company_id, entry_date, memo, source_type, source_id, status, created_at`,
-    [companyId, date, memo, sourceType, sourceId],
+    [companyId, date, memo, sourceType, sourceId, reversesEntryId],
   );
   const entry = entryResult.rows[0];
   const postedLines = [];
