@@ -54,7 +54,7 @@ async function listJournalEntries(client, companyId, filters) {
 
 async function getJournalEntry(client, companyId, entryId) {
   const entryResult = await client.query(
-    `SELECT id, entry_date, memo, source_type, source_id, status, created_at
+    `SELECT id, entry_date, memo, source_type, source_id, reverses_entry_id, status, created_at
      FROM journal_entries
      WHERE company_id = $1 AND id = $2`,
     [companyId, entryId],
