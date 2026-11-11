@@ -38,4 +38,4 @@ const incomeStatementSchema = z.object({
 
 const balanceSheetSchema = trialBalanceSchema;
 
-module.exports = { trialBalanceSchema, incomeStatementSchema, balanceSheetSchema };
+module.exports = { dateSchema, trialBalanceSchema, incomeStatementSchema, balanceSheetSchema };
