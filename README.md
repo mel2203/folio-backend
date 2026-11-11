@@ -187,6 +187,81 @@ Payment body: `{ "paymentDate": "<yyyy-mm-dd>", "amount": "50.00", "method": "ba
 }
 ```
 
+## Purchases
+
+Purchase endpoints require `Authorization: Bearer <token>`. Vendor and bill lists return `{ "data": [...], "meta": { "page": 1, "limit": 20, "total": 0 } }`. Dates use plain `YYYY-MM-DD` strings and amounts are decimal strings with at most two places. Bill lines have no tax; the server sums the entered line amounts exactly in integer cents.
+
+### Vendors
+
+- `GET /api/vendors?search=<text>&active=true|false&page=1&limit=20`
+- `POST /api/vendors`
+- `GET /api/vendors/:id`
+- `PATCH /api/vendors/:id`
+
+Vendor fields mirror customers: `name`, `email`, `phone`, `address`, `paymentTermsDays`, and `isActive`. Payment terms default to 30 days. Vendors are deactivated rather than deleted.
+
+### Bills
+
+- `GET /api/bills?status=draft|open|partial|paid|void&vendorId=<uuid>&from=YYYY-MM-DD&to=YYYY-MM-DD&number=<text>&page=1&limit=20`
+- `POST /api/bills` creates a draft.
+- `GET /api/bills/:id`
+- `PATCH /api/bills/:id` edits a draft only.
+- `DELETE /api/bills/:id` deletes a draft only (204 response).
+- `POST /api/bills/:id/post` posts a draft to the ledger and changes status to `open`.
+- `POST /api/bills/:id/void` reverses an unpaid open bill.
+- `POST /api/bills/:id/payments` records a payment.
+
+Create body:
+
+```json
+{
+  "vendorId": "<vendor-id>", "billNumber": "SUP-1042",
+  "issueDate": "<yyyy-mm-dd>", "dueDate": "<yyyy-mm-dd>",
+  "items": [
+    { "description": "Office rent", "amount": "300.00", "accountId": "<active-expense-or-asset-account-id>" }
+  ],
+  "notes": "<notes>"
+}
+```
+
+`billNumber` is required when saving the draft and is unique per company and vendor. `issueDate` defaults to today in Kuala Lumpur time. If `dueDate` is omitted, it defaults to issue date plus the vendor's payment terms. Each item amount must be positive and its account must be an active expense or asset account in the company. Posting debits each item account and credits the Accounts Payable system-role account.
+
+Bill detail response:
+
+```json
+{
+  "data": {
+    "id": "<bill-id>", "companyId": "<company-id>", "vendorId": "<vendor-id>",
+    "billNumber": "SUP-1042", "issueDate": "<yyyy-mm-dd>", "dueDate": "<yyyy-mm-dd>",
+    "status": "open", "total": "300.00", "amountPaid": "0.00", "notes": null,
+    "journalEntryId": "<journal-entry-id>", "reversalEntryId": null, "createdAt": "<timestamp>",
+    "vendor": { "id": "<vendor-id>", "name": "Example Supplier", "email": null, "phone": null, "address": null, "paymentTermsDays": 30 },
+    "items": [{ "id": "<item-id>", "description": "Office rent", "amount": "300.00", "accountId": "<account-id>", "accountCode": "6000", "accountName": "Rent Expense", "accountType": "expense" }],
+    "payments": []
+  }
+}
+```
+
+Payment body: `{ "paymentDate": "<yyyy-mm-dd>", "amount": "100.00", "method": "bank_transfer", "reference": "<reference-or-null>", "payingAccountId": "<active-asset-account-id>" }`. The server debits Accounts Payable and credits the paying asset account in the same transaction that stores the payment and updates `amountPaid`/status. Overpayments are rejected. Only unpaid `open` bills can be voided; a void creates a posted reversal and keeps the original entry immutable.
+
+### Accounts Payable Aging
+
+`GET /api/reports/ap-aging?asOf=YYYY-MM-DD`
+
+`asOf` is optional and defaults to today in Kuala Lumpur time. The response groups outstanding open bills by vendor and due-date bucket. Payments after `asOf` do not reduce historical outstanding amounts. The ledger balance is the credit-normal Accounts Payable balance; `difference` is ledger balance minus aging total.
+
+```json
+{
+  "data": {
+    "asOf": "<yyyy-mm-dd>", "currency": "MYR",
+    "vendors": [{ "vendorId": "<vendor-id>", "name": "Example Supplier", "current": "0.00", "days1To30": "100.00", "days31To60": "0.00", "days61To90": "0.00", "days90Plus": "0.00", "total": "100.00" }],
+    "totals": { "current": "0.00", "days1To30": "100.00", "days31To60": "0.00", "days61To90": "0.00", "days90Plus": "0.00", "total": "100.00" },
+    "ledgerBalance": "100.00", "difference": "0.00", "reconciles": true
+  }
+}
+```
+
+
 ## Reports
 
 All report endpoints require `Authorization: Bearer <token>`. Reports are calculated from posted journal lines for the authenticated user's company. Date ranges are inclusive; dates use `YYYY-MM-DD`. If a date parameter is omitted, defaults use the current date in `Asia/Kuala_Lumpur`.

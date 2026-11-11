@@ -1,16 +1,9 @@
 const { AppError, BusinessRuleError } = require('../errors');
 const { addCents, centsToDecimal, decimalToCents } = require('../utils/money');
+const { assertDocumentStatus, nextPaymentStatus } = require('../utils/document-status');
+const { roundHalfUp, toHundredths } = require('../utils/rounding');
 const { getTodayInKualaLumpur } = require('../utils/report-date');
 const { postJournalEntry } = require('./journal.service');
-
-function toHundredths(value) {
-  const [whole, fraction = ''] = value.split('.');
-  return BigInt(whole) * 100n + BigInt(fraction.padEnd(2, '0'));
-}
-
-function roundHalfUp(numerator, denominator) {
-  return (numerator + denominator / 2n) / denominator;
-}
 
 function calculateInvoiceItems(items) {
   let subtotalCents = 0n;
@@ -211,7 +204,7 @@ async function lockInvoice(client, companyId, invoiceId) {
 
 async function updateInvoice(client, companyId, invoiceId, changes) {
   const current = await lockInvoice(client, companyId, invoiceId);
-  if (current.status !== 'draft') throw new BusinessRuleError('Only draft invoices can be edited');
+  assertDocumentStatus(current.status, ['draft'], 'Only draft invoices can be edited');
   const customerId = changes.customerId ?? current.customerId;
   await assertCustomerActive(client, companyId, customerId);
   const items = changes.items;
@@ -246,7 +239,7 @@ async function updateInvoice(client, companyId, invoiceId, changes) {
 
 async function deleteInvoice(client, companyId, invoiceId) {
   const invoice = await lockInvoice(client, companyId, invoiceId);
-  if (invoice.status !== 'draft') throw new BusinessRuleError('Only draft invoices can be deleted');
+  assertDocumentStatus(invoice.status, ['draft'], 'Only draft invoices can be deleted');
   await client.query('DELETE FROM invoices WHERE company_id = $1 AND id = $2', [companyId, invoiceId]);
 }
 
@@ -264,7 +257,7 @@ async function nextInvoiceNumber(client, companyId) {
 
 async function sendInvoice(client, companyId, invoiceId) {
   const invoice = await lockInvoice(client, companyId, invoiceId);
-  if (invoice.status !== 'draft') throw new BusinessRuleError('Only draft invoices can be sent');
+  assertDocumentStatus(invoice.status, ['draft'], 'Only draft invoices can be sent');
   await assertCustomerActive(client, companyId, invoice.customerId);
   const itemResult = await client.query(
     `SELECT item.description, item.quantity::text AS quantity,
@@ -327,9 +320,7 @@ async function sendInvoice(client, companyId, invoiceId) {
 
 async function recordPayment(client, companyId, invoiceId, input) {
   const invoice = await lockInvoice(client, companyId, invoiceId);
-  if (!['sent', 'partial'].includes(invoice.status)) {
-    throw new BusinessRuleError('Payments can only be recorded for sent or partially paid invoices');
-  }
+  assertDocumentStatus(invoice.status, ['sent', 'partial'], 'Payments can only be recorded for sent or partially paid invoices');
   const amountCents = decimalToCents(input.amount);
   const outstandingCents = decimalToCents(invoice.total) - decimalToCents(invoice.amountPaid);
   if (amountCents > outstandingCents) throw new BusinessRuleError('Payment exceeds the invoice amount outstanding');
@@ -365,7 +356,7 @@ async function recordPayment(client, companyId, invoiceId, input) {
     [companyId, invoiceId, paymentDate, input.amount, input.method, input.reference ?? null, input.depositAccountId, entry.id],
   );
   const nextPaidCents = decimalToCents(invoice.amountPaid) + amountCents;
-  const nextStatus = nextPaidCents === decimalToCents(invoice.total) ? 'paid' : 'partial';
+  const nextStatus = nextPaymentStatus(decimalToCents(invoice.total), nextPaidCents);
   await client.query(
     'UPDATE invoices SET amount_paid = $3, status = $4 WHERE company_id = $1 AND id = $2',
     [companyId, invoiceId, centsToDecimal(nextPaidCents), nextStatus],
@@ -375,9 +366,8 @@ async function recordPayment(client, companyId, invoiceId, input) {
 
 async function voidInvoice(client, companyId, invoiceId) {
   const invoice = await lockInvoice(client, companyId, invoiceId);
-  if (invoice.status !== 'sent' || decimalToCents(invoice.amountPaid) !== 0n) {
-    throw new BusinessRuleError('Only sent invoices with no payments can be voided');
-  }
+  assertDocumentStatus(invoice.status, ['sent'], 'Only sent invoices with no payments can be voided');
+  if (decimalToCents(invoice.amountPaid) !== 0n) throw new BusinessRuleError('Only sent invoices with no payments can be voided');
   const originalLines = await client.query(
     `SELECT line.account_id AS "accountId", line.debit::text AS debit, line.credit::text AS credit,
             line.description

@@ -13,6 +13,8 @@ const authRoutes = require('./routes/auth.routes');
 const reportRoutes = require('./routes/report.routes');
 const customerRoutes = require('./routes/customer.routes');
 const invoiceRoutes = require('./routes/invoice.routes');
+const vendorRoutes = require('./routes/vendor.routes');
+const billRoutes = require('./routes/bill.routes');
 const authenticate = require('./middleware/authenticate');
 const errorHandler = require('./middleware/error-handler');
 
@@ -34,6 +36,8 @@ app.use('/api/journal-entries', journalRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/customers', customerRoutes);
 app.use('/api/invoices', invoiceRoutes);
+app.use('/api/vendors', vendorRoutes);
+app.use('/api/bills', billRoutes);
 app.use(errorHandler);
 
 module.exports = app;
